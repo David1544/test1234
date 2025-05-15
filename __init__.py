@@ -1,7 +1,7 @@
 bl_info = {
 	"name": "PES FMDL format",
-	"author": "foreground, updated for Blender 4.4",
-	"blender": (4, 4, 0),
+	"author": "foreground, updated for Blender 4.2",
+	"blender": (4, 2, 0),
 	"category": "Import-Export",
 	"version": (0, 8, 0),
 	"location": "File > Import/Export",
@@ -12,6 +12,10 @@ bl_info = {
 
 import bpy
 import bpy.props
+
+# Import compatibility helpers
+from . import BlenderCompatibility
+from . import MeshAttributes
 
 # Import and expose PesSkeletonData variables
 from . import PesSkeletonData
@@ -56,14 +60,18 @@ def register():
 			description = "Apply automatic anti-blur measures for constant shaders"
 		)
 	
-	# In Blender 4.4, the Texture system has been replaced with Image nodes
+	# In Blender 4.2+, the Texture system has been replaced with Image nodes
 	# We'll create custom properties for Image objects instead
-	if not hasattr(bpy.types.Image, "fmdl_texture_filename"):
-		bpy.types.Image.fmdl_texture_filename = bpy.props.StringProperty(name = "Texture Filename")
-	if not hasattr(bpy.types.Image, "fmdl_texture_directory"):
-		bpy.types.Image.fmdl_texture_directory = bpy.props.StringProperty(name = "Texture Directory")
-	if not hasattr(bpy.types.Image, "fmdl_texture_role"):
-		bpy.types.Image.fmdl_texture_role = bpy.props.StringProperty(name = "Texture Role")
+	try:
+		if not hasattr(bpy.types.Image, "fmdl_texture_filename"):
+			bpy.types.Image.fmdl_texture_filename = bpy.props.StringProperty(name = "Texture Filename")
+		if not hasattr(bpy.types.Image, "fmdl_texture_directory"):
+			bpy.types.Image.fmdl_texture_directory = bpy.props.StringProperty(name = "Texture Directory")
+		if not hasattr(bpy.types.Image, "fmdl_texture_role"):
+			bpy.types.Image.fmdl_texture_role = bpy.props.StringProperty(name = "Texture Role")
+	except Exception as e:
+		print(f"Warning: Could not register Image properties: {str(e)}")
+		print("Using custom properties as fallback for texture metadata")
 	
 	UI.register()
 

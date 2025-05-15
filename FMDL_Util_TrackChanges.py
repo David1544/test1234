@@ -5,7 +5,7 @@ def FMDL_Util_TrackChanges(scene, depsgraph=None):
     """
     Track changes to objects, materials, and textures.
     
-    In Blender 4.4, we use depsgraph_update_post instead of scene_update_post.
+    In Blender 4.x, we use depsgraph_update_post instead of scene_update_post.
     This function does three separate things:
     - it keeps vertexGroupSummaryCache up to date, with help of latestMeshObjectList
     - it keeps the list of export summaries up to date, with help of latestObjectTree
@@ -42,11 +42,20 @@ def FMDL_Util_TrackChanges(scene, depsgraph=None):
                 if material_slot.material is None:
                     continue
                 
-                # In Blender 4.4, texture_slots are deprecated
-                # We need to check material nodes instead
-                if material_slot.material.use_nodes:
-                    for node in material_slot.material.node_tree.nodes:
+                # Support both texture_slots (Blender 2.7x-style) and nodes (4.x-style)
+                material = material_slot.material
+                
+                # Try node-based approach first (Blender 4.x)
+                if hasattr(material, "use_nodes") and material.use_nodes:
+                    for node in material.node_tree.nodes:
                         if node.type == 'TEX_IMAGE' and node.image:
+                            # We can't directly check if an image was updated
+                            pass
+                
+                # Fall back to texture_slots (compatibility with older code)
+                elif hasattr(material, "texture_slots"):
+                    for slot in material.texture_slots:
+                        if slot and slot.texture and slot.texture.type == 'IMAGE' and slot.texture.image:
                             # We can't directly check if an image was updated
                             pass
 
@@ -73,3 +82,9 @@ def FMDL_Util_TrackChanges(scene, depsgraph=None):
 inActiveUpdate = False
 latestObjectTree = ()
 latestMeshObjectList = ()
+
+# Add MaterialParameter class for Blender 4.2 compatibility
+class FMDL_MaterialParameter(bpy.types.PropertyGroup):
+    """Material parameter property group for FMDL materials"""
+    name: bpy.props.StringProperty(name="Parameter Name")
+    parameters: bpy.props.FloatVectorProperty(name="Parameter Values", size=4, default=(0.0, 0.0, 0.0, 0.0))

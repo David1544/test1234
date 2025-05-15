@@ -361,7 +361,7 @@ def register():
     if not hasattr(bpy.types.Scene, "fmdl_import_all_bounding_boxes"):
         bpy.types.Scene.fmdl_import_all_bounding_boxes = bpy.props.BoolProperty(name = "Import all bounding boxes", default = False)
     
-    # Register skeleton properties with hasattr check for Blender 4.4
+    # Register skeleton properties with hasattr check for Blender 4.2+
     if not hasattr(bpy.types.Scene, "fmdl_skeleton_type"):
         bpy.types.Scene.fmdl_skeleton_type = bpy.props.EnumProperty(name = "Skeleton type",
             items = skeletonTypes,
@@ -429,6 +429,10 @@ def register():
         bpy.types.Scene.fmdl_export_bounding_boxes = bpy.props.BoolProperty(name = "Export bounding boxes", default = True)
     
     # Register file properties
+    if not hasattr(bpy.types.Object, "fmdl_file"):
+        bpy.types.Object.fmdl_file = bpy.props.BoolProperty(name = "Is FMDL File", default = False)
+    if not hasattr(bpy.types.Object, "fmdl_filename"):
+        bpy.types.Object.fmdl_filename = bpy.props.StringProperty(name = "FMDL Filename", default = "")
     if not hasattr(bpy.types.Object, "fmdl_file_path"):
         bpy.types.Object.fmdl_file_path = bpy.props.StringProperty(name = "File path", default = "")
     if not hasattr(bpy.types.Object, "fmdl_file_version"):
@@ -442,7 +446,9 @@ def register():
     if not hasattr(bpy.types.Material, "fmdl_material_technique"):
         bpy.types.Material.fmdl_material_technique = bpy.props.StringProperty(name = "Technique", default = "")
     if not hasattr(bpy.types.Material, "fmdl_material_parameters"):
-        bpy.types.Material.fmdl_material_parameters = bpy.props.CollectionProperty(type = FMDL_Util_TrackChanges.FMDL_MaterialParameter)
+        # Import the class from the main module to avoid circular references
+        from . import __init__ as fmdl_init
+        bpy.types.Material.fmdl_material_parameters = bpy.props.CollectionProperty(type = fmdl_init.FMDL_MaterialParameter)
     if not hasattr(bpy.types.Material, "fmdl_material_parameters_active"):
         bpy.types.Material.fmdl_material_parameters_active = bpy.props.IntProperty(name = "Active parameter", default = 0)
     
@@ -485,6 +491,8 @@ def unregister():
     del bpy.types.Object.fmdl_file_section_count
     del bpy.types.Object.fmdl_file_version
     del bpy.types.Object.fmdl_file_path
+    del bpy.types.Object.fmdl_filename
+    del bpy.types.Object.fmdl_file
     del bpy.types.Scene.fmdl_export_bounding_boxes
     del bpy.types.Scene.fmdl_export_all_vertices
     del bpy.types.Scene.fmdl_export_all_bones

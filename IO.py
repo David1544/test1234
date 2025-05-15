@@ -5,6 +5,7 @@ import os
 import os.path
 import re
 
+from . import BlenderCompatibility
 from . import FmdlFile, FmdlAntiBlur, FmdlMeshSplitting, FmdlSplitVertexEncoding, Ftex, PesSkeletonData
 
 
@@ -60,8 +61,18 @@ def createBoundingBox(context, meshObject, min, max):
 	
 	blenderLatticeObject = bpy.data.objects.new(name, blenderLattice)
 	blenderLatticeObject.parent = bpy.data.objects[objectID]
-	context.scene.objects.link(blenderLatticeObject)
-	context.scene.update()
+	
+	# Handle scene updates in a way compatible with both older and newer Blender versions
+	if hasattr(context.scene, "objects") and hasattr(context.scene.objects, "link"):
+		# Older Blender versions (2.7x)
+		context.scene.objects.link(blenderLatticeObject)
+		if hasattr(context.scene, "update"):
+			context.scene.update()
+	else:
+		# Newer Blender versions (2.8+)
+		context.scene.collection.objects.link(blenderLatticeObject)
+		if hasattr(context, "view_layer") and hasattr(context.view_layer, "update"):
+			context.view_layer.update()
 
 def createFittingBoundingBox(context, meshObject):
 	transformedMesh = meshObject.data.copy()
@@ -79,45 +90,228 @@ def createTexture(role, directory, filename):
 	blenderImage = bpy.data.images.new(filename, width = 0, height = 0)
 	blenderImage.source = 'FILE'
 	
+	# Function to find the best matching colorspace from available options
+	def find_best_colorspace(desired_types, fallback="sRGB"):
+		# Get all available colorspace names in current Blender version
+		available_colorspaces = []
+		try:
+			for colorspace in blenderImage.colorspace_settings.bl_rna.properties['name'].enum_items:
+				available_colorspaces.append(colorspace.identifier)
+		except:
+			# If we can't get enum items, use hardcoded common ones
+			available_colorspaces = ['sRGB', 'Non-Color', 'Linear Rec.709', 'Linear', 'Raw']
+			
+		# Try to find an exact match first
+		for colorspace_name in desired_types:
+			if colorspace_name in available_colorspaces:
+				return colorspace_name
+				
+		# If no exact match, try partial matches (for "Linear" types)
+		if "linear" in [t.lower() for t in desired_types]:
+			for colorspace_name in available_colorspaces:
+				if "linear" in colorspace_name.lower() and "rec.709" in colorspace_name.lower():
+					return colorspace_name
+			for colorspace_name in available_colorspaces:
+				if "linear" in colorspace_name.lower():
+					return colorspace_name
+					
+		return fallback
+	
+	# Determine and set the best colorspace
+	desired_colorspace = ""
 	if '_SRGB' in role:
-		blenderImage.colorspace_settings.name = 'sRGB'
+		desired_colorspace = 'sRGB'
+		colorspace = find_best_colorspace(['sRGB', 'Filmic sRGB'], 'sRGB')
 	elif '_LIN' in role:
-		blenderImage.colorspace_settings.name = 'Linear'
+		desired_colorspace = 'Linear'
+		colorspace = find_best_colorspace(['Linear', 'Linear Rec.709', 'Linear ACES'], 'sRGB')
 	else:
-		blenderImage.colorspace_settings.name = 'Non-Color'
+		desired_colorspace = 'Non-Color'
+		colorspace = find_best_colorspace(['Non-Color', 'Utility', 'Raw'], 'Non-Color')
+	
+	# Set the colorspace and log if it's different from what was requested
+	blenderImage.colorspace_settings.name = colorspace
+	if desired_colorspace != colorspace:
+		print(f"Note: Using '{colorspace}' colorspace instead of '{desired_colorspace}' which is not available in this Blender version")
 	
 	textureName = "[%s] %s" % (role, filename)
 	blenderTexture = bpy.data.textures.new(textureName, type = 'IMAGE')
 	blenderTexture.image = blenderImage
-	blenderTexture.use_alpha = True
 	
-	if '_NRM' in role:
+	# Set texture properties if they exist
+	if hasattr(blenderTexture, "use_alpha"):
+		blenderTexture.use_alpha = True
+	
+	if '_NRM' in role and hasattr(blenderTexture, "use_normal_map"):
 		blenderTexture.use_normal_map = True
 	
-	blenderTexture.fmdl_texture_filename = filename
-	blenderTexture.fmdl_texture_directory = directory
-	blenderTexture.fmdl_texture_role = role
+	# Store FMDL specific properties with error handling
+	try:
+		# Store on texture
+		if hasattr(blenderTexture, "fmdl_texture_filename"):
+			blenderTexture.fmdl_texture_filename = filename
+		if hasattr(blenderTexture, "fmdl_texture_directory"):
+			blenderTexture.fmdl_texture_directory = directory
+		if hasattr(blenderTexture, "fmdl_texture_role"):
+			blenderTexture.fmdl_texture_role = role
+		
+		# Also store on image for node-based materials
+		if hasattr(blenderImage, "fmdl_texture_filename"):
+			blenderImage.fmdl_texture_filename = filename
+		if hasattr(blenderImage, "fmdl_texture_directory"):
+			blenderImage.fmdl_texture_directory = directory
+		if hasattr(blenderImage, "fmdl_texture_role"):
+			blenderImage.fmdl_texture_role = role
+			
+		# Store as custom properties if the normal properties don't exist
+		if not hasattr(blenderImage, "fmdl_texture_filename"):
+			blenderImage["fmdl_texture_filename"] = filename
+			blenderImage["fmdl_texture_directory"] = directory
+			blenderImage["fmdl_texture_role"] = role
+	except Exception as e:
+		print(f"Warning: Could not set texture properties: {str(e)}")
+		
+	# Store metadata in the name as well (backup retrieval method)
+	blenderImage.name = f"[{role}] {filename}"
 	
 	return blenderTexture
 
 def createTextureSlot(blenderMaterial, blenderTexture, uvMapColor, uvMapNormals):
-	blenderTextureSlot = blenderMaterial.texture_slots.add()
-	blenderTextureSlot.texture = blenderTexture
-	blenderTextureSlot.texture_coords = 'UV'
-	if '_NRM' in blenderTexture.fmdl_texture_role:
-		blenderTextureSlot.uv_layer = uvMapNormals
-	else:
-		blenderTextureSlot.uv_layer = uvMapColor
+	# For Blender 4.x we need to use nodes
+	if hasattr(blenderMaterial, "use_nodes") and not hasattr(blenderMaterial, "texture_slots"):
+		# Make sure nodes are enabled
+		if not blenderMaterial.use_nodes:
+			blenderMaterial.use_nodes = True
+			
+		# Create a new image texture node
+		texture_node = blenderMaterial.node_tree.nodes.new('ShaderNodeTexImage')
+		texture_node.image = blenderTexture.image if hasattr(blenderTexture, "image") else blenderTexture
+		
+		# Get texture role with fallbacks
+		texture_role = None
+		if hasattr(blenderTexture, "fmdl_texture_role"):
+			texture_role = blenderTexture.fmdl_texture_role
+		elif "fmdl_texture_role" in blenderTexture:
+			texture_role = blenderTexture["fmdl_texture_role"]
+		elif hasattr(blenderTexture, "name") and "[" in blenderTexture.name and "]" in blenderTexture.name:
+			# Extract from name format [role] filename
+			parts = blenderTexture.name.split("]")
+			if len(parts) >= 1:
+				texture_role = parts[0].strip().strip("[")
+				
+		# Default texture role if all else fails
+		if not texture_role:
+			texture_role = "Base_Tex_SRGB"
+		
+		# Set up UV mapping based on texture role
+		if texture_role and '_NRM' in texture_role:
+			# Create a proper normal map setup
+			texture_node.label = "Normal Map"
+			# Store the UV map name for export
+			texture_node["uv_map"] = uvMapNormals
+			
+			# Create a normal map node to properly handle the normal map texture
+			normal_map_node = blenderMaterial.node_tree.nodes.new('ShaderNodeNormalMap')
+			normal_map_node.location = (texture_node.location[0] + 300, texture_node.location[1])
+			
+			# Connect texture to normal map node
+			blenderMaterial.node_tree.links.new(texture_node.outputs["Color"], normal_map_node.inputs["Color"])
+			
+			# Find principle BSDF to connect the normal map
+			principled = None
+			for node in blenderMaterial.node_tree.nodes:
+				if node.type == 'BSDF_PRINCIPLED':
+					principled = node
+					break
+			
+			if not principled:
+				principled = blenderMaterial.node_tree.nodes.new('ShaderNodeBsdfPrincipled')
+				
+			# Connect normal map to the principled BSDF with error handling
+			try:
+				if "Normal" in principled.inputs:
+					blenderMaterial.node_tree.links.new(normal_map_node.outputs["Normal"], principled.inputs["Normal"])
+				else:
+					print("Warning: Could not find Normal input in Principled BSDF shader")
+			except Exception as e:
+				print(f"Warning: Could not connect normal map to shader: {str(e)}")
+		else:
+			# Determine the label based on the texture role we obtained earlier
+			texture_node.label = "Diffuse Map" if texture_role in ['Base_Tex_SRGB', 'Base_Tex_LIN'] else texture_role
+			# Store the UV map name for export
+			texture_node["uv_map"] = uvMapColor
+		
+		# Connect to shader if it's a base texture
+		if texture_role == 'Base_Tex_SRGB' or texture_role == 'Base_Tex_LIN':
+			# Find or create Principled BSDF
+			principled = None
+			for node in blenderMaterial.node_tree.nodes:
+				if node.type == 'BSDF_PRINCIPLED':
+					principled = node
+					break
+			
+			if not principled:
+				principled = blenderMaterial.node_tree.nodes.new('ShaderNodeBsdfPrincipled')
+				# Connect texture to principled BSDF with error handling for different Blender versions
+				try:
+					# Try to connect to "Base Color" (Blender 2.8+)
+					if "Base Color" in principled.inputs:
+						blenderMaterial.node_tree.links.new(texture_node.outputs["Color"], principled.inputs["Base Color"])
+					elif "Color" in principled.inputs:  # Fallback for older versions
+						blenderMaterial.node_tree.links.new(texture_node.outputs["Color"], principled.inputs["Color"])
+						
+					# Connect alpha
+					if "Alpha" in principled.inputs:
+						blenderMaterial.node_tree.links.new(texture_node.outputs["Alpha"], principled.inputs["Alpha"])
+				except Exception as e:
+					print(f"Warning: Could not connect texture to shader: {str(e)}")
+		
+		return texture_node
 	
-	if blenderTexture.fmdl_texture_role == 'Base_Tex_SRGB' or blenderTexture.fmdl_texture_role == 'Base_Tex_LIN':
-		blenderTextureSlot.use_map_diffuse = True
-		blenderTextureSlot.use_map_color_diffuse = True
-		blenderTextureSlot.use_map_alpha = True
-		blenderTextureSlot.use = True
+	# Legacy texture slot system for compatibility
 	else:
-		blenderTextureSlot.use = False
-	
-	return blenderTextureSlot
+		try:
+			blenderTextureSlot = blenderMaterial.texture_slots.add()
+			blenderTextureSlot.texture = blenderTexture
+			blenderTextureSlot.texture_coords = 'UV'
+			
+			# Get texture role with fallbacks
+			texture_role = None
+			if hasattr(blenderTexture, "fmdl_texture_role"):
+				texture_role = blenderTexture.fmdl_texture_role
+			elif "fmdl_texture_role" in blenderTexture:
+				texture_role = blenderTexture["fmdl_texture_role"]
+			elif hasattr(blenderTexture, "name") and "[" in blenderTexture.name and "]" in blenderTexture.name:
+				# Extract from name format [role] filename
+				parts = blenderTexture.name.split("]")
+				if len(parts) >= 1:
+					texture_role = parts[0].strip().strip("[")
+					
+			if not texture_role:
+				texture_role = "Base_Tex_SRGB"
+				
+			if '_NRM' in texture_role:
+				blenderTextureSlot.uv_layer = uvMapNormals
+			else:
+				blenderTextureSlot.uv_layer = uvMapColor
+			
+			if texture_role == 'Base_Tex_SRGB' or texture_role == 'Base_Tex_LIN':
+				blenderTextureSlot.use_map_diffuse = True
+				blenderTextureSlot.use_map_color_diffuse = True
+				blenderTextureSlot.use_map_alpha = True
+				blenderTextureSlot.use = True
+			else:
+				blenderTextureSlot.use = False
+			
+			return blenderTextureSlot
+		except AttributeError:
+			# If texture_slots doesn't exist but we failed to create nodes
+			print("Warning: Failed to create texture slot. Using fallback approach.")
+			# Attach to material in a way we can retrieve later
+			if not hasattr(blenderMaterial, "fmdl_textures"):
+				blenderMaterial.fmdl_textures = []
+			blenderMaterial.fmdl_textures.append((blenderTexture, uvMapColor if '_NRM' not in blenderTexture.fmdl_texture_role else uvMapNormals))
+			return None
 
 def importFmdl(context, fmdl, filename, importSettings = None):
 	UV_MAP_COLOR = 'UVMap'
@@ -211,9 +405,35 @@ def importFmdl(context, fmdl, filename, importSettings = None):
 			else:
 				uvMapNormals = UV_MAP_COLOR
 			
-			blenderMaterial.emit = 1.0
-			blenderMaterial.alpha = 0.0
-			blenderMaterial.use_transparency = True
+			# Handle material properties differently for Blender 4.2+
+			# We need to create/use a node-based material instead
+			if hasattr(blenderMaterial, "use_nodes"):
+				blenderMaterial.use_nodes = True
+				# Get the principled BSDF node or create it if it doesn't exist
+				principled = None
+				for node in blenderMaterial.node_tree.nodes:
+					if node.type == 'BSDF_PRINCIPLED':
+						principled = node
+						break
+				
+				if not principled:
+					principled = blenderMaterial.node_tree.nodes.new('ShaderNodeBsdfPrincipled')
+				
+				# Set emission and alpha properties on the principled node
+				if hasattr(principled.inputs, "Emission Strength"):
+					principled.inputs["Emission Strength"].default_value = 1.0
+				
+				# Handle transparency
+				principled.inputs["Alpha"].default_value = 0.0
+				blenderMaterial.blend_method = 'BLEND'
+			else:
+				# Legacy Blender behavior (though this won't be hit in 4.2+)
+				if hasattr(blenderMaterial, "emit"):
+					blenderMaterial.emit = 1.0
+				if hasattr(blenderMaterial, "alpha"):
+					blenderMaterial.alpha = 0.0
+				if hasattr(blenderMaterial, "use_transparency"):
+					blenderMaterial.use_transparency = True
 			
 			for (role, texture) in materialInstance.textures:
 				addTexture(blenderMaterial, role, texture, textureIDs, uvMapColor, uvMapNormals, textureSearchPath, loadTextures)
@@ -274,11 +494,21 @@ def importFmdl(context, fmdl, filename, importSettings = None):
 		blenderArmatureObject = bpy.data.objects.new("Skeleton", blenderArmature)
 		armatureObjectID = blenderArmatureObject.name
 		
-		context.scene.objects.link(blenderArmatureObject)
-		context.scene.objects.active = blenderArmatureObject
+		# Handle scene object linking in a way compatible with both older and newer Blender versions
+		if hasattr(context.scene, "objects") and hasattr(context.scene.objects, "link"):
+			# Older Blender versions (2.7x)
+			context.scene.objects.link(blenderArmatureObject)
+			if hasattr(context.scene.objects, "active"):
+				context.scene.objects.active = blenderArmatureObject
+		else:
+			# Newer Blender versions (2.8+)
+			context.scene.collection.objects.link(blenderArmatureObject)
+			if hasattr(context, "view_layer"):
+				context.view_layer.objects.active = blenderArmatureObject
 		
-		bpy.ops.object.mode_set(context.copy(), mode = 'EDIT')
-		
+		# Set edit mode using our compatibility helper
+		BlenderCompatibility.run_ops_with_context(bpy.ops.object.mode_set, mode='EDIT')
+			
 		bonesByName = {}
 		for bone in fmdl.bones:
 			bonesByName[bone.name] = bone
@@ -287,7 +517,8 @@ def importFmdl(context, fmdl, filename, importSettings = None):
 		for bone in fmdl.bones:
 			addBone(blenderArmature, bone, boneIDs, bonesByName)
 		
-		bpy.ops.object.mode_set(context.copy(), mode = 'OBJECT')
+		# Return to object mode using our compatibility helper
+		BlenderCompatibility.run_ops_with_context(bpy.ops.object.mode_set, mode='OBJECT')
 		
 		return (armatureObjectID, boneIDs)
 	
@@ -299,36 +530,90 @@ def importFmdl(context, fmdl, filename, importSettings = None):
 		blenderModifier.object = blenderArmatureObject
 		blenderModifier.use_vertex_groups = True
 		
+		# Import our compatibility helper
+		from . import BlenderCompatibility
+		
 		vertexGroupIDs = {}
 		for bone in boneGroup.bones:
 			blenderBone = blenderArmature.bones[boneIDs[bone]]
-			blenderVertexGroup = blenderMeshObject.vertex_groups.new(blenderBone.name)
+			# Use compatibility helper for creating vertex groups
+			blenderVertexGroup = BlenderCompatibility.create_vertex_group(blenderMeshObject, blenderBone.name)
 			vertexGroupIDs[bone] = blenderVertexGroup.name
 		return vertexGroupIDs
 	
 	def findUvMapImage(blenderMaterial, uvMapName, rolePrefix):
 		options = []
-		for slot in blenderMaterial.texture_slots:
-			if slot is None:
-				continue
-			if slot.uv_layer != uvMapName:
-				continue
-			if (
-				    slot.texture is not None
-				and slot.texture.type == 'IMAGE'
-				and slot.texture.image is not None
-				and slot.texture.image.size[0] != 0
-			):
-				image = slot.texture.image
-			else:
-				image = None
-			options.append((image, slot.texture.fmdl_texture_role))
 		
-		for (image, role) in options:
+		# Check for node-based materials (Blender 4.x)
+		if hasattr(blenderMaterial, "use_nodes") and blenderMaterial.use_nodes:
+			for node in blenderMaterial.node_tree.nodes:
+				if node.type != 'TEX_IMAGE' or not node.image or node.image.size[0] == 0:
+					continue
+					
+				# Check UV map from our stored property
+				node_uv_map = node.get("uv_map", "")
+				if node_uv_map != uvMapName:
+					continue
+				
+				# We found a valid image node with matching UV map
+				# Get the texture role from various sources
+				role = None
+				if node.label:
+					role = node.label
+				elif hasattr(node.image, "fmdl_texture_role"):
+					role = node.image.fmdl_texture_role
+				elif "fmdl_texture_role" in node.image:
+					role = node.image["fmdl_texture_role"]
+				elif hasattr(node.image, "name") and "[" in node.image.name and "]" in node.image.name:
+					parts = node.image.name.split("]")
+					if len(parts) >= 1:
+						role = parts[0].strip().strip("[")
+				
+				# Default to Base_Tex_SRGB if no role found
+				if not role:
+					role = "Base_Tex_SRGB"
+					
+				options.append((node.image, role))
+		
+		# Try legacy texture slots if available
+		elif hasattr(blenderMaterial, "texture_slots"):
+			for slot in blenderMaterial.texture_slots:
+				if slot is None:
+					continue
+				if slot.uv_layer != uvMapName:
+					continue
+				if (
+						slot.texture is not None
+					and slot.texture.type == 'IMAGE'
+					and slot.texture.image is not None
+					and slot.texture.image.size[0] != 0
+				):
+					# Get texture role with fallbacks
+					texture_role = None
+					if hasattr(slot.texture, "fmdl_texture_role"):
+						texture_role = slot.texture.fmdl_texture_role
+					elif "fmdl_texture_role" in slot.texture:
+						texture_role = slot.texture["fmdl_texture_role"]
+					elif hasattr(slot.texture, "name") and "[" in slot.texture.name and "]" in slot.texture.name:
+						parts = slot.texture.name.split("]")
+						if len(parts) >= 1:
+							texture_role = parts[0].strip().strip("[")
+							
+					# Default to Base_Tex_SRGB if no role is found
+					if not texture_role:
+						texture_role = "Base_Tex_SRGB"
+						
+					options.append((slot.texture.image, texture_role))
+		
+		# Handle results
+		for option in options:
+			image, role = option
 			if role.lower().startswith(rolePrefix.lower()):
 				return image
+				
 		if len(options) > 0:
 			return options[0][0]
+			
 		return None
 	
 	def importMesh(mesh, name, fmdl, materialIDs, armatureObjectID, boneIDs):
@@ -375,7 +660,9 @@ def importFmdl(context, fmdl, filename, importSettings = None):
 			blenderMesh.normals_split_custom_set([
 				normalize((vertex.normal.x, -vertex.normal.z, vertex.normal.y)) for vertex in loopVertices
 			])
-			blenderMesh.use_auto_smooth = True
+			# Use compatibility helper for auto smooth
+			from . import MeshAttributes
+			MeshAttributes.set_auto_smooth(blenderMesh, True)
 		
 		if mesh.vertexFields.hasColor:
 			colorLayer = blenderMesh.vertex_colors.new()
@@ -386,8 +673,9 @@ def importFmdl(context, fmdl, filename, importSettings = None):
 			colorLayer.active_render = True
 		
 		if mesh.vertexFields.uvCount >= 1:
-			uvTexture = blenderMesh.uv_textures.new(name = UV_MAP_COLOR)
-			uvLayer = blenderMesh.uv_layers[uvTexture.name]
+			# Use compatibility helper for UV layers
+			from . import MeshAttributes
+			uvLayer, uvTexture = MeshAttributes.create_uv_layer(blenderMesh, UV_MAP_COLOR)
 			
 			uvLayer.data.foreach_set("uv", tuple(itertools.chain.from_iterable([
 				(vertex.uv[0].u, 1.0 - vertex.uv[0].v) for vertex in loopVertices
@@ -402,8 +690,9 @@ def importFmdl(context, fmdl, filename, importSettings = None):
 					uvTexture.data[i].image = image
 		
 		if mesh.vertexFields.uvCount >= 2 and 0 not in mesh.vertexFields.uvEqualities[1]:
-			uvTexture = blenderMesh.uv_textures.new(name = UV_MAP_NORMALS)
-			uvLayer = blenderMesh.uv_layers[uvTexture.name]
+			# Use compatibility helper for UV layers
+			from . import MeshAttributes
+			uvLayer, uvTexture = MeshAttributes.create_uv_layer(blenderMesh, UV_MAP_NORMALS)
 			
 			uvLayer.data.foreach_set("uv", tuple(itertools.chain.from_iterable([
 				(vertex.uv[1].u, 1.0 - vertex.uv[1].v) for vertex in loopVertices
@@ -423,7 +712,13 @@ def importFmdl(context, fmdl, filename, importSettings = None):
 		
 		blenderMeshObject = bpy.data.objects.new(blenderMesh.name, blenderMesh)
 		meshObjectID = blenderMeshObject.name
-		context.scene.objects.link(blenderMeshObject)
+		# Handle scene object linking in a way compatible with both older and newer Blender versions
+		if hasattr(context.scene, "objects") and hasattr(context.scene.objects, "link"):
+			# Older Blender versions (2.7x)
+			context.scene.objects.link(blenderMeshObject)
+		else:
+			# Newer Blender versions (2.8+)
+			context.scene.collection.objects.link(blenderMeshObject)
 		
 		if mesh.vertexFields.hasBoneMapping:
 			vertexGroupIDs = addSkeletonMeshModifier(blenderMeshObject, mesh.boneGroup, armatureObjectID, boneIDs)
@@ -459,7 +754,13 @@ def importFmdl(context, fmdl, filename, importSettings = None):
 			blenderMeshGroupObject = bpy.data.objects[meshObjectIDs[meshGroup.meshes[0]]]
 		else:
 			blenderMeshGroupObject = bpy.data.objects.new(meshGroup.name, None)
-			context.scene.objects.link(blenderMeshGroupObject)
+			# Handle scene object linking in a way compatible with both older and newer Blender versions
+			if hasattr(context.scene, "objects") and hasattr(context.scene.objects, "link"):
+				# Older Blender versions (2.7x)
+				context.scene.objects.link(blenderMeshGroupObject)
+			else:
+				# Newer Blender versions (2.8+)
+				context.scene.collection.objects.link(blenderMeshGroupObject)
 			
 			for mesh in meshGroup.meshes:
 				bpy.data.objects[meshObjectIDs[mesh]].parent = blenderMeshGroupObject
@@ -513,8 +814,10 @@ def importFmdl(context, fmdl, filename, importSettings = None):
 		if armatureObjectID != None:
 			bpy.data.objects[armatureObjectID].parent = bpy.data.objects[blenderMeshGroupID]
 		
-		bpy.data.objects[blenderMeshGroupID].fmdl_file = True
-		bpy.data.objects[blenderMeshGroupID].fmdl_filename = filename
+		# Use compatibility function to set properties
+		from . import BlenderCompatibility
+		BlenderCompatibility.set_object_property(bpy.data.objects[blenderMeshGroupID], "fmdl_file", True)
+		BlenderCompatibility.set_object_property(bpy.data.objects[blenderMeshGroupID], "fmdl_filename", filename)
 		
 		return blenderMeshGroupID
 	
@@ -528,7 +831,7 @@ def importFmdl(context, fmdl, filename, importSettings = None):
 	else:
 		activeObjectID = bpy.data.objects.find(context.active_object.name)
 	if context.mode != 'OBJECT':
-		bpy.ops.object.mode_set(context.copy(), mode = 'OBJECT')
+		BlenderCompatibility.run_ops_with_context(bpy.ops.object.mode_set, mode = 'OBJECT')
 	
 	
 	
@@ -575,7 +878,8 @@ def importFmdl(context, fmdl, filename, importSettings = None):
 	
 	
 	if context.mode != 'OBJECT':
-		bpy.ops.object.mode_set(context.copy(), mode = 'OBJECT')
+		# Return to object mode using our compatibility helper
+		BlenderCompatibility.run_ops_with_context(bpy.ops.object.mode_set, mode='OBJECT')
 	if activeObjectID != None:
 		blenderArmatureObject = bpy.data.objects[activeObjectID]
 	
@@ -591,16 +895,177 @@ def exportFmdl(context, rootObjectName, exportSettings = None, otherSettings = N
 	def exportMaterial(blenderMaterial, textureFmdlObjects):
 		materialInstance = FmdlFile.FmdlFile.MaterialInstance()
 		
-		for slot in blenderMaterial.texture_slots:
-			if slot == None:
-				continue
-			blenderTexture = slot.texture
-			if blenderTexture not in textureFmdlObjects:
-				texture = FmdlFile.FmdlFile.Texture()
-				texture.filename = blenderTexture.fmdl_texture_filename
-				texture.directory = blenderTexture.fmdl_texture_directory
-				textureFmdlObjects[blenderTexture] = texture
-			materialInstance.textures.append((blenderTexture.fmdl_texture_role, textureFmdlObjects[blenderTexture]))
+		# Handle node-based materials (Blender 4.x)
+		if hasattr(blenderMaterial, "use_nodes") and blenderMaterial.use_nodes:
+			for node in blenderMaterial.node_tree.nodes:
+				if node.type != 'TEX_IMAGE' or not node.image:
+					continue
+					
+				# Get texture info
+				blenderImage = node.image
+				
+				# Get the texture metadata from several possible sources
+				filename = None
+				directory = ""
+				role = None
+				
+				# Try direct property access
+				if hasattr(blenderImage, "fmdl_texture_filename") and blenderImage.fmdl_texture_filename:
+					filename = blenderImage.fmdl_texture_filename
+					if hasattr(blenderImage, "fmdl_texture_directory"):
+						directory = blenderImage.fmdl_texture_directory
+					if hasattr(blenderImage, "fmdl_texture_role"):
+						role = blenderImage.fmdl_texture_role
+				
+				# Try custom properties
+				if filename is None and "fmdl_texture_filename" in blenderImage:
+					filename = blenderImage["fmdl_texture_filename"]
+					if "fmdl_texture_directory" in blenderImage:
+						directory = blenderImage["fmdl_texture_directory"]
+					if "fmdl_texture_role" in blenderImage:
+						role = blenderImage["fmdl_texture_role"]
+				
+				# Try to extract from name
+				if filename is None and "[" in blenderImage.name and "]" in blenderImage.name:
+					parts = blenderImage.name.split("]")
+					if len(parts) >= 2:
+						role_part = parts[0].strip().strip("[")
+						filename_part = parts[1].strip()
+						if role_part and filename_part:
+							role = role_part
+							filename = filename_part
+
+				# If we still don't have a filename, use the image's name
+				if filename is None:
+					filename = blenderImage.name
+					# Use the file path if available
+					if blenderImage.filepath:
+						import os
+						filepath = blenderImage.filepath
+						filename = os.path.basename(filepath)
+						directory = os.path.dirname(filepath).rstrip('/').rstrip('\\')
+				
+				# Skip if we couldn't determine a filename
+				if not filename:
+					continue
+					
+				# Create a texture object
+				if blenderImage not in textureFmdlObjects:
+					texture = FmdlFile.FmdlFile.Texture()
+					texture.filename = filename
+					texture.directory = directory
+					textureFmdlObjects[blenderImage] = texture
+					
+				# Determine the role from the data we gathered or use a default
+				texture_role = role if role else node.label
+				if not texture_role:
+					texture_role = "Base_Tex_SRGB"
+					
+				materialInstance.textures.append((texture_role, textureFmdlObjects[blenderImage]))
+		
+		# Legacy texture slot system
+		elif hasattr(blenderMaterial, "texture_slots"):
+			for slot in blenderMaterial.texture_slots:
+				if slot == None:
+					continue
+				blenderTexture = slot.texture
+				# Skip if not a valid texture
+				if not blenderTexture:
+					continue
+					
+				if blenderTexture not in textureFmdlObjects:
+					texture = FmdlFile.FmdlFile.Texture()
+					
+					# Get filename with fallbacks
+					if hasattr(blenderTexture, "fmdl_texture_filename"):
+						texture.filename = blenderTexture.fmdl_texture_filename
+					elif "fmdl_texture_filename" in blenderTexture:
+						texture.filename = blenderTexture["fmdl_texture_filename"]
+					elif hasattr(blenderTexture, "name") and "[" in blenderTexture.name and "]" in blenderTexture.name:
+						# Try to extract from name format [role] filename
+						parts = blenderTexture.name.split("]")
+						if len(parts) >= 2:
+							texture.filename = parts[1].strip()
+					else:
+						# Use the texture name as a last resort
+						texture.filename = blenderTexture.name
+					
+					# Get directory with fallbacks
+					if hasattr(blenderTexture, "fmdl_texture_directory"):
+						texture.directory = blenderTexture.fmdl_texture_directory
+					elif "fmdl_texture_directory" in blenderTexture:
+						texture.directory = blenderTexture["fmdl_texture_directory"]
+					else:
+						texture.directory = ""
+						
+					textureFmdlObjects[blenderTexture] = texture
+					
+				# Get texture role with fallbacks
+				texture_role = None
+				if hasattr(blenderTexture, "fmdl_texture_role"):
+					texture_role = blenderTexture.fmdl_texture_role
+				elif "fmdl_texture_role" in blenderTexture:
+					texture_role = blenderTexture["fmdl_texture_role"]
+				elif hasattr(blenderTexture, "name") and "[" in blenderTexture.name and "]" in blenderTexture.name:
+					# Try to extract from name format [role] filename
+					parts = blenderTexture.name.split("]")
+					if len(parts) >= 1:
+						texture_role = parts[0].strip().strip("[")
+						
+				if not texture_role:
+					texture_role = "Base_Tex_SRGB"
+					
+				materialInstance.textures.append((texture_role, textureFmdlObjects[blenderTexture]))
+		
+		# Check if we added custom textures via our fallback approach
+		elif hasattr(blenderMaterial, "fmdl_textures"):
+			for (blenderTexture, uvMap) in blenderMaterial.fmdl_textures:
+				if not blenderTexture:
+					continue
+					
+				if blenderTexture not in textureFmdlObjects:
+					texture = FmdlFile.FmdlFile.Texture()
+					
+					# Get filename with fallbacks
+					if hasattr(blenderTexture, "fmdl_texture_filename"):
+						texture.filename = blenderTexture.fmdl_texture_filename
+					elif "fmdl_texture_filename" in blenderTexture:
+						texture.filename = blenderTexture["fmdl_texture_filename"]
+					elif hasattr(blenderTexture, "name") and "[" in blenderTexture.name and "]" in blenderTexture.name:
+						# Try to extract from name format [role] filename
+						parts = blenderTexture.name.split("]")
+						if len(parts) >= 2:
+							texture.filename = parts[1].strip()
+					else:
+						# Use the texture name as a last resort
+						texture.filename = blenderTexture.name
+					
+					# Get directory with fallbacks
+					if hasattr(blenderTexture, "fmdl_texture_directory"):
+						texture.directory = blenderTexture.fmdl_texture_directory
+					elif "fmdl_texture_directory" in blenderTexture:
+						texture.directory = blenderTexture["fmdl_texture_directory"]
+					else:
+						texture.directory = ""
+						
+					textureFmdlObjects[blenderTexture] = texture
+				
+				# Get texture role with fallbacks
+				texture_role = None
+				if hasattr(blenderTexture, "fmdl_texture_role"):
+					texture_role = blenderTexture.fmdl_texture_role
+				elif "fmdl_texture_role" in blenderTexture:
+					texture_role = blenderTexture["fmdl_texture_role"]
+				elif hasattr(blenderTexture, "name") and "[" in blenderTexture.name and "]" in blenderTexture.name:
+					# Try to extract from name format [role] filename
+					parts = blenderTexture.name.split("]")
+					if len(parts) >= 1:
+						texture_role = parts[0].strip().strip("[")
+						
+				if not texture_role:
+					texture_role = "Base_Tex_SRGB"
+					
+				materialInstance.textures.append((texture_role, textureFmdlObjects[blenderTexture]))
 		
 		for parameter in blenderMaterial.fmdl_material_parameters:
 			materialInstance.parameters.append((parameter.name, [v for v in parameter.parameters]))
@@ -701,7 +1166,10 @@ def exportFmdl(context, rootObjectName, exportSettings = None, otherSettings = N
 			bpy.data.meshes.remove(modifiedBlenderMesh)
 			modifiedBlenderMesh = newBlenderMesh
 		
-		modifiedBlenderMesh.use_auto_smooth = True
+		# Use compatibility helper for auto smooth
+		from . import MeshAttributes
+		MeshAttributes.set_auto_smooth(modifiedBlenderMesh, True)
+		
 		if uvLayerNormal is None:
 			uvLayerTangent = uvLayerColor
 		else:
@@ -1220,7 +1688,8 @@ def exportFmdl(context, rootObjectName, exportSettings = None, otherSettings = N
 		otherSettings = {}
 	
 	if context.mode != 'OBJECT':
-		bpy.ops.object.mode_set(context.copy(), mode = 'OBJECT')
+		# Return to object mode using our compatibility helper
+		BlenderCompatibility.run_ops_with_context(bpy.ops.object.mode_set, mode='OBJECT')
 	
 	
 	
