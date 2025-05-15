@@ -96,3 +96,28 @@ def create_uv_layer(mesh, name):
     uv_texture_compat = UVTextureCompat(mesh, name)
     
     return uv_layer, uv_texture_compat
+
+def calculate_tangents(mesh, uv_map):
+    """Calculate tangents on a mesh in a way that's compatible with any Blender version
+    
+    Args:
+        mesh: The blender mesh to calculate tangents on
+        uv_map: The UV map to use for calculating tangents
+        
+    In Blender 2.7x-2.9x: mesh.calc_tangents(uv_map)
+    In Blender 4.x+: mesh.calc_tangents(uvmap=uv_map)
+    """
+    try:
+        # Try older style (positional argument)
+        mesh.calc_tangents(uv_map)
+    except TypeError:
+        try:
+            # Try newer style (keyword argument)
+            mesh.calc_tangents(uvmap=uv_map)
+        except Exception as e:
+            # If both methods fail, print the error and fallback to not calculating tangents
+            print(f"Error calculating tangents: {str(e)}")
+            print("Tangents may not be correctly calculated. This could affect normal mapping.")
+            return False
+    
+    return True

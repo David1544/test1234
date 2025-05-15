@@ -1174,7 +1174,7 @@ def exportFmdl(context, rootObjectName, exportSettings = None, otherSettings = N
 			uvLayerTangent = uvLayerColor
 		else:
 			uvLayerTangent = uvLayerNormal
-		modifiedBlenderMesh.calc_tangents(uvLayerTangent)
+		MeshAttributes.calculate_tangents(modifiedBlenderMesh, uvLayerTangent)
 		
 		
 		

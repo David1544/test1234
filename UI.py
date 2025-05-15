@@ -147,7 +147,9 @@ class FMDL_Scene_Export_Operator(bpy.types.Operator, ExportHelper):
             otherSettings["selection_type"] = 'ALL'
             otherSettings["selection_object"] = None
             otherSettings["selection_slot"] = None
-            IO.exportFmdl(context, filename, exportSettings, otherSettings)
+            fmdlFile = IO.exportFmdl(context, filename, exportSettings, otherSettings)
+            # Write the file to disk
+            fmdlFile.writeFile(filename)
         except Exception as error:
             self.report({'ERROR'}, "Error exporting Fmdl: " + str(error))
             print("Error exporting Fmdl: " + str(error))
@@ -220,7 +222,9 @@ class FMDL_Scene_Export_Selection_Dialog(bpy.types.Operator, ExportHelper):
             otherSettings["selection_type"] = self.selection_type
             otherSettings["selection_object"] = context.active_object
             otherSettings["selection_slot"] = context.active_object.active_material_index if context.active_object else 0
-            IO.exportFmdl(context, filename, exportSettings, otherSettings)
+            fmdlFile = IO.exportFmdl(context, filename, exportSettings, otherSettings)
+            # Write the file to disk
+            fmdlFile.writeFile(filename)
         except Exception as error:
             self.report({'ERROR'}, "Error exporting Fmdl: " + str(error))
             print("Error exporting Fmdl: " + str(error))

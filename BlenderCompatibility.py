@@ -115,3 +115,34 @@ def get_object_property(obj, property_name, default=None):
     else:
         # Return default value if property doesn't exist
         return default
+
+def write_fmdl_file(context, fmdl_file, filename):
+    """Write an FMDL file to disk, handling any compatibility issues
+    
+    Args:
+        context: The Blender context
+        fmdl_file: The FMDL file object to write
+        filename: The path to write the file to
+    
+    Returns:
+        True if successful, False if an error occurred
+    """
+    try:
+        # Make sure the directory exists
+        import os
+        os.makedirs(os.path.dirname(os.path.abspath(filename)), exist_ok=True)
+        
+        # Try to write the file
+        fmdl_file.writeFile(filename)
+        
+        # Verify the file was written
+        if not os.path.exists(filename):
+            print(f"Error: File {filename} was not created")
+            return False
+            
+        return True
+    except Exception as e:
+        print(f"Error writing FMDL file: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
